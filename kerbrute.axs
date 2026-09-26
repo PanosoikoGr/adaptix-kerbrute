@@ -18,6 +18,7 @@ var metadata = {
 var FLAG_DOWNGRADE = 0x1;
 var FLAG_SAFE      = 0x2;
 var FLAG_VERBOSE   = 0x4;
+var FLAG_ROAST     = 0x8;
 
 function bof_path(id) {
     return ax.script_dir() + "kerbrute." + ax.arch(id) + ".o";
@@ -36,6 +37,7 @@ function build_flags(j) {
     if (j["--downgrade"]) f |= FLAG_DOWNGRADE;
     if (j["--safe"])      f |= FLAG_SAFE;
     if (j["-v"])          f |= FLAG_VERBOSE;
+    if (j["--roast"])     f |= FLAG_ROAST;
     return f;
 }
 
@@ -58,6 +60,7 @@ cmd_userenum.addArgFlagInt("--jitter", "jitter", false, "Random ms added to each
 cmd_userenum.addArgBool("--downgrade",          "Advertise RC4-only in the etype list (arcfour-hmac-md5)");
 cmd_userenum.addArgBool("--safe",               "Abort all remaining attempts if any account is locked out");
 cmd_userenum.addArgBool("-v",                   "Verbose — also log not-found users and errors");
+cmd_userenum.addArgBool("--roast",              "Extract and print AS-REP hash for offline cracking (hashcat -m 18200 / 19600 / 19700)");
 cmd_userenum.addArgFile("userlist", true, "Local path to wordlist — one username per line");
 
 cmd_userenum.setPreHook(function(id, cmdline, parsed_json) {

